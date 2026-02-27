@@ -5,6 +5,8 @@ use robot_arm_core::kinematics::{RobotModel, DHParam};
 use robot_arm_core::simulator::SimulatorState;
 use std::f32::consts::PI;
 use nalgebra::Vector3;
+use std::fs::File;
+use std::io::BufReader;
 
 #[derive(Component)]
 struct RobotJoint {
@@ -29,7 +31,32 @@ struct RobotResource {
     show_axes: bool,
 }
 
+fn load_config() -> RobotModel {
+    let path = "config.yaml";
+    match File::open(path) {
+        Ok(file) => {
+            let reader = BufReader::new(file);
+            match serde_yaml::from_reader(reader) {
+                Ok(model) => {
+                    info!("Successfully loaded config from {}", path);
+                    model
+                },
+                Err(e) => {
+                    warn!("Failed to parse {}: {}. Using default SIA30D model.", path, e);
+                    RobotModel::new_sia30d()
+                }
+            }
+        },
+        Err(e) => {
+            warn!("Could not open {}: {}. Using default SIA30D model.", path, e);
+            RobotModel::new_sia30d()
+        }
+    }
+}
+
 fn main() {
+    let model = load_config();
+
     App::new()
         .insert_resource(ClearColor(Color::rgb(0.1, 0.1, 0.1)))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -42,7 +69,7 @@ fn main() {
         .add_plugins(EguiPlugin)
         .add_plugins(TransformGizmoPlugin::default()) // Add Gizmo Plugin
         .insert_resource(RobotResource {
-            model: RobotModel::new_sia30d(),
+            model,
             joint_angles: vec![0.0; 7],
             target_position: [0.5, 0.5, 0.5], // Default target
             use_ik: false,
