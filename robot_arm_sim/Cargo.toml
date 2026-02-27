@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 bevy = "0.15"
 bevy_egui = "0.33"
-bevy_transform_gizmo = "0.12"
+egui_plot = "0.31"
 nalgebra = "0.33"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"

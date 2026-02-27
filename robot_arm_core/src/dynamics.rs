@@ -1,5 +1,5 @@
-use nalgebra::{Vector3, Matrix3, Matrix4, Vector, U7, OVector};
-use crate::kinematics::{RobotModel, DHParam};
+use nalgebra::{Vector3, Matrix3};
+use crate::kinematics::RobotModel;
 
 #[derive(Clone, Debug)]
 pub struct LinkDynamics {
@@ -73,7 +73,7 @@ impl RobotDynamics {
             
             // Transform from {i-1} to {i}
             let transform = model.dh_params[i].to_transform(theta);
-            let rotation = transform.fixed_slice::<3, 3>(0, 0).into_owned(); 
+            let rotation = transform.fixed_view::<3, 3>(0, 0).into_owned();
             let position = transform.column(3).xyz(); // P_{i-1, i} relative to {i-1} expressed in {i-1}
             let rotation_t = rotation.transpose(); // R_i^{i-1} (from i-1 to i) needs Inverse for vector projection
 
@@ -114,8 +114,8 @@ impl RobotDynamics {
             let v_dot_ci = v_dot + omega_dot.cross(&r_ci) + omega.cross(&omega_cross_r);
             
             // Inertial force/torque
-            let F_i = v_dot_ci * link.mass; // F = ma
-            let N_i = link.inertia * omega_dot + omega.cross(&(link.inertia * omega)); // Euler eq
+            let f_inertial = v_dot_ci * link.mass; // F = ma
+            let n_inertial = link.inertia * omega_dot + omega.cross(&(link.inertia * omega)); // Euler eq
             
             // Force balance
             // f_i = R_{i+1}^i * f_{i+1} + F_i
@@ -144,7 +144,7 @@ impl RobotDynamics {
             } else {
                 // Get transformation from i to i+1
                 let transform = model.dh_params[i+1].to_transform(q[i+1]);
-                let rotation = transform.fixed_slice::<3, 3>(0, 0).into_owned(); // R_i+1^i
+                let rotation = transform.fixed_view::<3, 3>(0, 0).into_owned(); // R_i+1^i
                 let position = transform.column(3).xyz(); // P_{i, i+1} expressed in {i}
                 
                 f_next_in_i = rotation * f_next;
@@ -152,8 +152,8 @@ impl RobotDynamics {
                 p_next_in_i = position;
             }
             
-            let f_i = F_i + f_next_in_i;
-            let n_i = N_i + n_next_in_i + r_ci.cross(&F_i) + p_next_in_i.cross(&f_next_in_i);
+            let f_i = f_inertial + f_next_in_i;
+            let n_i = n_inertial + n_next_in_i + r_ci.cross(&f_inertial) + p_next_in_i.cross(&f_next_in_i);
             
             // Project to joint axis (Z) for torque
             // tau_i = n_i . z_i
@@ -169,5 +169,54 @@ impl RobotDynamics {
         }
 
         tau
+    }
+
+    pub fn forward_dynamics(
+        &self,
+        model: &RobotModel,
+        q: &[f64],
+        q_dot: &[f64],
+        tau: &[f64],
+    ) -> Vec<f64> {
+        let n = q.len();
+        let zeros = vec![0.0; n];
+        
+        // 1. Calculate h(q, q_dot) (Corriolis + Centrifugal + Gravity) assuming q_ddot = 0
+        // h = ID(q, q_dot, 0)
+        let h = self.inverse_dynamics(model, q, q_dot, &zeros);
+        
+        // 2. Calculate g(q) (Gravity only) assuming q_dot=0, q_ddot=0
+        // g = ID(q, 0, 0)
+        // Needed to isolate M columns from ID(q, 0, e_i) resultant which is M_i + g
+        let g_force = self.inverse_dynamics(model, q, &zeros, &zeros);
+        
+        let mut m_mat = nalgebra::DMatrix::zeros(n, n);
+        
+        for i in 0..n {
+             let mut e_i = vec![0.0; n];
+             e_i[i] = 1.0;
+             
+             // term = M * e_i + g
+             let term = self.inverse_dynamics(model, q, &zeros, &e_i);
+             
+             // M_col_i = term - g
+             for r in 0..n {
+                 m_mat[(r, i)] = term[r] - g_force[r];
+             }
+        }
+        
+        // 3. Solve M * q_ddot + h = tau  =>  M * q_ddot = tau - h
+        let mut rhs = nalgebra::DVector::zeros(n);
+        for i in 0..n {
+            rhs[i] = tau[i] - h[i];
+        }
+        
+        // Solve linear system
+        if let Some(solution) = m_mat.lu().solve(&rhs) {
+             solution.as_slice().to_vec()
+        } else {
+             // Fallback if M is singular (should rarely happen for robot arms)
+             vec![0.0; n]
+        }
     }
 }

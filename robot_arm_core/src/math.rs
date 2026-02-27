@@ -4,7 +4,7 @@ use nalgebra::{OVector, Dim, DefaultAllocator};
 // Generic state size D.
 
 pub trait OdeModel<D: Dim> 
-where DefaultAllocator: nalgebra::allocator::Allocator<f64, D> {
+where DefaultAllocator: nalgebra::allocator::Allocator<D> {
     // Computes dy/dt given state y and time t
     fn derivative(&self, state: &OVector<f64, D>, t: f64) -> OVector<f64, D>;
 }
@@ -16,7 +16,7 @@ impl RungeKutta4 {
     where 
         D: Dim,
         M: OdeModel<D>,
-        DefaultAllocator: nalgebra::allocator::Allocator<f64, D>,
+        DefaultAllocator: nalgebra::allocator::Allocator<D>,
     {
         let k1 = model.derivative(state, t);
         let k2 = model.derivative(&(state + &k1 * (dt * 0.5)), t + dt * 0.5);
