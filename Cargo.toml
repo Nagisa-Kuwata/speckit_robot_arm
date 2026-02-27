@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "robot_arm_core",
+    "robot_arm_sim",
+]
+resolver = "2"

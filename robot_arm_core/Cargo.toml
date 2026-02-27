@@ -1,0 +1,6 @@
+[package]
+name = "robot_arm_core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
