@@ -1,8 +1,10 @@
 use bevy::prelude::*;
-use bevy_egui::EguiPlugin;
+use bevy_egui::{egui, EguiContexts, EguiPlugin};
+use bevy_transform_gizmo::{GizmoTransformable, TransformGizmoPlugin}; // Import Gizmo
 use robot_arm_core::kinematics::{RobotModel, DHParam};
 use robot_arm_core::simulator::SimulatorState;
 use std::f32::consts::PI;
+use nalgebra::Vector3;
 
 #[derive(Component)]
 struct RobotJoint {
@@ -15,10 +17,16 @@ enum JointType {
     Prismatic, // Assuming all revolute for now for SIA30D
 }
 
+#[derive(Component)]
+struct IkTarget;
+
 #[derive(Resource)]
 struct RobotResource {
     model: RobotModel,
     joint_angles: Vec<f64>,
+    target_position: [f64; 3], // For IK
+    use_ik: bool,
+    show_axes: bool,
 }
 
 fn main() {
@@ -32,13 +40,18 @@ fn main() {
             ..default()
         }))
         .add_plugins(EguiPlugin)
+        .add_plugins(TransformGizmoPlugin::default()) // Add Gizmo Plugin
         .insert_resource(RobotResource {
             model: RobotModel::new_sia30d(),
             joint_angles: vec![0.0; 7],
+            target_position: [0.5, 0.5, 0.5], // Default target
+            use_ik: false,
+            show_axes: true,
         })
         .add_systems(Startup, setup_scene)
         .add_systems(Startup, spawn_robot)
-        .add_systems(Update, update_robot_joints)
+        .add_systems(Startup, spawn_ik_target)
+        .add_systems(Update, (update_robot_joints, update_ik_target_from_gizmo, ui_system, ik_system, draw_axes_system))
         .run();
 }
 
@@ -164,6 +177,48 @@ fn spawn_robot(
     }
 }
 
+fn spawn_ik_target(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut robot_res: ResMut<RobotResource>,
+) {
+    // Initial position
+    let pos = Vec3::new(
+        robot_res.target_position[0] as f32,
+        robot_res.target_position[1] as f32,
+        robot_res.target_position[2] as f32,
+    );
+
+    commands.spawn((
+        PbrBundle {
+            mesh: meshes.add(Sphere::new(0.05)),
+            material: materials.add(Color::rgb(1.0, 0.0, 1.0)),
+            transform: Transform::from_translation(pos),
+            ..default()
+        },
+        GizmoTransformable,
+        IkTarget,
+    ));
+}
+
+fn update_ik_target_from_gizmo(
+    mut query: Query<&Transform, With<IkTarget>>,
+    mut robot_res: ResMut<RobotResource>,
+) {
+    if let Ok(transform) = query.get_single() {
+        let t = transform.translation;
+        robot_res.target_position = [t.x as f64, t.y as f64, t.z as f64];
+        
+        // If gizmo moved, enable IK automatically maybe? 
+        // Or just let user toggle. User might move gizmo then enable IK.
+    }
+}
+
+// Update Gizmo/Target position if UI changed it
+// (This requires caching or change detection, omitted for brevity but useful)
+// For now, Gizmo is the source of truth if touched.
+
 fn update_robot_joints(
     mut query: Query<(&mut Transform, &RobotJoint)>,
     robot_res: Res<RobotResource>,
@@ -173,5 +228,113 @@ fn update_robot_joints(
         // DH param theta rotation is around Z axis
         let offset = robot_res.model.dh_params[joint.index].theta_offset;
         transform.rotation = Quat::from_rotation_z((angle + offset) as f32);
+    }
+}
+
+fn ui_system(
+    mut contexts: EguiContexts,
+    mut robot_res: ResMut<RobotResource>,
+) {
+    egui::Window::new("Robot Control").show(contexts.ctx_mut(), |ui| {
+        ui.heading("Joint Control");
+        
+        let limits = &robot_res.model.joint_limits.clone(); // Clone to avoid borrow issues
+        
+        for i in 0..7 {
+            ui.horizontal(|ui| {
+                ui.label(format!("Joint {}: ", i + 1));
+                let (min, max) = limits[i];
+                let val = &mut robot_res.joint_angles[i];
+                // Display in degrees for user friendliness
+                let mut deg_val = val.to_degrees();
+                if ui.add(egui::Slider::new(&mut deg_val, min.to_degrees()..=max.to_degrees()).text("deg")).changed() {
+                    *val = deg_val.to_radians();
+                    // Disable IK if manual control is used
+                    robot_res.use_ik = false;
+                }
+            });
+        }
+
+        ui.separator();
+        ui.heading("Inverse Kinematics");
+        ui.checkbox(&mut robot_res.use_ik, "Enable IK");
+        
+        ui.horizontal(|ui| {
+            ui.label("Target X:");
+            ui.add(egui::DragValue::new(&mut robot_res.target_position[0]).speed(0.01));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Target Y:");
+            ui.add(egui::DragValue::new(&mut robot_res.target_position[1]).speed(0.01));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Target Z:");
+            ui.add(egui::DragValue::new(&mut robot_res.target_position[2]).speed(0.01));
+        });
+
+        if ui.button("Solve IK").clicked() {
+            // Manual trigger
+            solve_ik(&mut robot_res);
+        }
+        
+        ui.separator();
+        ui.checkbox(&mut robot_res.show_axes, "Show Axes");
+    });
+}
+
+fn ik_system(
+    mut robot_res: ResMut<RobotResource>,
+) {
+    if robot_res.use_ik {
+        solve_ik(&mut robot_res);
+    }
+}
+
+fn solve_ik(robot_res: &mut RobotResource) {
+    let target = Vector3::new(
+        robot_res.target_position[0],
+        robot_res.target_position[1],
+        robot_res.target_position[2]
+    );
+    
+    // Call IK solver from core
+    if let Some(new_angles) = robot_res.model.inverse_kinematics_position(&target, &robot_res.joint_angles) {
+        robot_res.joint_angles = new_angles;
+    }
+}
+
+fn draw_axes_system(
+    mut gizmos: Gizmos,
+    query: Query<(&GlobalTransform, &RobotJoint)>, 
+    robot_res: Res<RobotResource>,
+) {
+    if !robot_res.show_axes { return; }
+
+    for (transform, _joint) in query.iter() {
+        let translation = transform.translation();
+        let rotation = transform.to_scale_rotation_translation().1;
+        
+        let axis_length = 0.2;
+        
+        // X axis (Red)
+        gizmos.line(
+            translation,
+            translation + rotation * Vec3::X * axis_length,
+            Color::RED,
+        );
+        
+        // Y axis (Green)
+        gizmos.line(
+            translation,
+            translation + rotation * Vec3::Y * axis_length,
+            Color::GREEN,
+        );
+        
+        // Z axis (Blue)
+        gizmos.line(
+            translation,
+            translation + rotation * Vec3::Z * axis_length,
+            Color::BLUE,
+        );
     }
 }
